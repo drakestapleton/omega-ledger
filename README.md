@@ -2,7 +2,8 @@
 
 **A pure seeded OM-2 fixed-slab double-entry financial ledger & analytical rollup engine with Exact Algebraic Delta Rollups and an Incremental FIPS 180-4 SHA-256 Merkle Tree (`39.0 KB` static AArch64 ELF, zero C, zero libc, zero heap allocations).**
 
-- **Claim status:** `IMPLEMENTED`, `EXERCISED`, and `VERIFIED` on DGX Spark Grace AArch64 (`MEASURED_DGX_SPARK_GRACE_A64`, pinned Cortex-X925 CPU `7`). Not multi-node or bare-metal qualified.
+- **Claim status:** `IMPLEMENTED`, `EXERCISED`, and `VERIFIED` on DGX Spark Grace AArch64 (`MEASURED_DGX_SPARK_GRACE_A64`, H2H benchmarks on Cortex-X925 CPU `7`; CWE/CVE security & corruption-survival gate on Cortex-A725 CPU `11`). Not multi-node or bare-metal qualified.
+- **Security receipt:** [**`docs/evidence/CWE-CVE-SECURITY-RECEIPT.md`**](docs/evidence/CWE-CVE-SECURITY-RECEIPT.md) — MITRE CWE Top 25 (`CWE-190`, `CWE-787`/`125`, `CWE-345`, `CWE-840`, `CWE-20`) refusal matrix + live `4,096`-account / 256-bit Merkle-root corruption-survival gate (`10/10 PASS`, `21` hostile transactions refused, `0` balances corrupted).
 - **Compiler provenance:** Built with the pinned seeded Omega compiler `seed/out/omc` (`sha256: 28fca13d44054e26f78c33d1753fd5c005d08e9144d95985c90bd75b60885072`).
 
 ---
@@ -107,9 +108,11 @@ Run the full pure OM-2 gate suite on Linux AArch64:
 bash scripts/gate.sh
 ```
 
-Verified controls:
+Verified controls (see [**`docs/evidence/CWE-CVE-SECURITY-RECEIPT.md`**](docs/evidence/CWE-CVE-SECURITY-RECEIPT.md) for the full MITRE CWE Top 25 / CVE mapping and raw logs):
 - **`test-sha256-parity`:** Exact 48-byte leaf & 72-byte node SHA-256 parity against `seed/ng/sha256.om` (`PASS`), independently cross-checked via Python `hashlib.sha256` and C.
-- **`test-overflow-trap`:** Crediting an account near `INT64_MAX` triggers Omega hardware signed overflow trap `1` (`exit 101`).
+- **`test-overflow-trap` (`CWE-190`):** Crediting an account near `INT64_MAX` triggers Omega hardware signed overflow trap `1` (`exit 101`).
+- **`test-oob-trap` (`CWE-787`/`CWE-125`):** Dynamic out-of-bounds slab write (`idx=4096`) triggers Omega mandatory bounds trap `3` (`exit 103`).
+- **`test-security-survival` (`10/10 PASS`, `CWE-840`/`CWE-345`/`CWE-20`/`CWE-125`/`CWE-787`):** Fires `21` hostile financial/OOB/atomic-rollback attacks and `4` single-bit Merkle proof forgeries against a live 50,000-tx ledger and verifies **`0 / 4,096` balances altered**, all `24` rollups & Top-8 breaches unchanged, and **bit-identical 256-bit Merkle root** (`0b206c9d...46ada`), followed by valid post-attack clearing & proof verification.
 - **`omega-ledger-gate` (`8/8 PASS, mismatches=0`):**
   - `T1`: Valid 2-leg transfer + 3-leg balanced journal + balance conservation.
   - `T2`: Refuses unbalanced multi-leg journal (`ST_ERR_UNBALANCED`), zero state mutation.

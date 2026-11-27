@@ -31,16 +31,19 @@ compile_om() {
 compile_om bin/omega-ledger-gate om/ledger_core.om om/ledger_gate.om
 compile_om bin/omega-ledger-bench om/ledger_core.om om/ledger_bench.om
 compile_om bin/test-overflow-trap om/ledger_core.om om/test_overflow_trap.om
+compile_om bin/test-oob-trap om/ledger_core.om om/test_oob_trap.om
+compile_om bin/test-security-survival om/ledger_core.om om/test_security_survival.om
 compile_om bin/test-sha256-parity om/ledger_core.om "$SHA256_REF" om/test_sha256_parity.om
 
 BENCH_BYTES="$(stat -c %s bin/omega-ledger-bench)"
 GATE_BYTES="$(stat -c %s bin/omega-ledger-gate)"
-echo "ELF_SIZES omega-ledger-bench=${BENCH_BYTES}B omega-ledger-gate=${GATE_BYTES}B"
+SURV_BYTES="$(stat -c %s bin/test-security-survival)"
+echo "ELF_SIZES omega-ledger-bench=${BENCH_BYTES}B omega-ledger-gate=${GATE_BYTES}B test-security-survival=${SURV_BYTES}B"
 
-echo "=== [1/3] FIPS 180-4 SHA-256 Parity vs seed/ng/sha256.om (CPU ${CPU_PIN}) ==="
+echo "=== [1/5] FIPS 180-4 SHA-256 Parity vs seed/ng/sha256.om (CPU ${CPU_PIN}) ==="
 taskset -c "$CPU_PIN" ./bin/test-sha256-parity
 
-echo "=== [2/3] Hardware Signed-64 Overflow Trap Negative Control (CPU ${CPU_PIN}, expect exit 101) ==="
+echo "=== [2/5] Hardware Signed-64 Overflow Trap Negative Control (CPU ${CPU_PIN}, expect exit 101, CWE-190) ==="
 set +e
 taskset -c "$CPU_PIN" ./bin/test-overflow-trap
 OV_RC=$?
@@ -51,7 +54,21 @@ if [ "$OV_RC" -ne 101 ]; then
   exit 1
 fi
 
-echo "=== [3/3] Full Ledger Refusal, Single-Bit Tamper & 100k Delta vs Full-Scan Gate (CPU ${CPU_PIN}) ==="
+echo "=== [3/5] Mandatory Bounds-Check OOB Write Trap Negative Control (CPU ${CPU_PIN}, expect exit 103, CWE-787/125) ==="
+set +e
+taskset -c "$CPU_PIN" ./bin/test-oob-trap
+OOB_RC=$?
+set -e
+echo "OOB_TRAP_EXIT=$OOB_RC"
+if [ "$OOB_RC" -ne 103 ]; then
+  echo "GATE_FAIL expected OOB bounds trap exit 103, got $OOB_RC" >&2
+  exit 1
+fi
+
+echo "=== [4/5] Full Ledger Refusal, Single-Bit Tamper & 100k Delta vs Full-Scan Gate (CPU ${CPU_PIN}) ==="
 taskset -c "$CPU_PIN" ./bin/omega-ledger-gate
+
+echo "=== [5/5] CWE/CVE Adversarial Refusal & 4,096-Account / Merkle-Root Corruption-Survival Gate (CPU ${CPU_PIN}) ==="
+taskset -c "$CPU_PIN" ./bin/test-security-survival
 
 echo "ALL_OM2_GATES_PASS"

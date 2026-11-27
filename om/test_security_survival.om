@@ -1,0 +1,400 @@
+note SPDX-License-Identifier: Apache-2.0
+note om/test_security_survival.om: Live CWE/CVE adversarial refusal & corruption-survival gate.
+note Proves that firing hostile financial/memory/Merkle inputs against a populated 4,096-account
+note ledger leaves ALL 4,096 account balances, ALL 24 algebraic rollups, ALL Top-8 risk breaches,
+note and the 256-bit FIPS 180-4 SHA-256 Merkle root 100% bit-exact uncorrupted, while subsequent
+note legitimate transactions continue committing cleanly.
+
+global sv_pre_bal long 4096
+global sv_pre_cls long 4
+global sv_pre_sec long 16
+global sv_pre_scalars long 4
+global sv_pre_top_id ulong 8
+global sv_pre_top_val long 8
+global sv_pre_root uint 8
+global sv_pre_meta ulong 4
+
+text t_sv_hdr "OMEGA-LEDGER CWE/CVE SECURITY & CORRUPTION-SURVIVAL GATE\n"
+text t_sv_p0 "PASS S0_POPULATE_50K_BASELINE_SNAPSHOT root="
+text t_sv_p1 "PASS S1_CWE840_REFUSE_UNBALANCED_JOURNALS refused=4\n"
+text t_sv_p2 "PASS S2_CWE20_REFUSE_BAD_LEGS_AND_ZERO_DELTA refused=5\n"
+text t_sv_p3 "PASS S3_CWE20_REFUSE_ZERO_AND_NEG_TRANSFERS refused=3\n"
+text t_sv_p4 "PASS S4_CWE125_787_REFUSE_OOB_ACCT_IDS refused=4\n"
+text t_sv_p5 "PASS S5_CWE840_REFUSE_SELF_AND_DUP_LEG_REPLAY refused=2\n"
+text t_sv_p6 "PASS S6_CWE840_REFUSE_OVERDRAFT_AND_ATOMIC_ROLLBACK refused=3\n"
+text t_sv_p7 "PASS S7_CWE345_SINGLE_BIT_PROOF_FORGERY_4_FIELDS rejected=4\n"
+text t_sv_p8 "PASS S8_CORRUPTION_SURVIVAL_4096_ACCTS_AND_ROOT_INTACT root="
+text t_sv_p9 "PASS S9_POST_ATTACK_VALID_TX_AND_PROOF_OK root="
+text t_sv_fail "SECURITY_SURVIVAL_FAIL code="
+text t_sv_done "SECURITY_SURVIVAL_PASS checks=10/10 hostile_refused=21 balances_corrupted=0 root_intact=1\n"
+
+fn sv_w s view uchar * to void
+k = write 1 s 0 len s
+if lt k 0
+ret
+end
+end
+
+fn sv_fail code ulong to int
+sv_w t_sv_fail
+emit_u64 code
+emit_nl
+ret int code
+end
+
+fn sv_snapshot to void
+for i ulong 4096
+put sv_pre_bal i get acct_bal i
+end
+for c ulong 4
+put sv_pre_cls c get roll_cls c
+put sv_pre_scalars c get roll_scalars c
+end
+for s ulong 16
+put sv_pre_sec s get roll_sec s
+end
+for k ulong 8
+put sv_pre_top_id k get top_id k
+put sv_pre_top_val k get top_val k
+put sv_pre_root k get mhash add 8 k
+end
+put sv_pre_meta 0 get batch_meta 4
+put sv_pre_meta 1 get batch_meta 5
+end
+
+fn sv_s0_baseline to ulong
+init_ledger
+for b ulong 50
+run_batch_tx b rem b 3
+commit_batch_delta
+end
+commit_batch_full
+if ne compare_delta_vs_cold 0
+ret ulong 10
+end
+sv_snapshot
+sv_w t_sv_p0
+emit_merkle_root 0
+emit_nl
+ret ulong 0
+end
+
+fn sv_s1_unbalanced to ulong
+note 2-leg +1 cent mint attempt
+put j_acct 0 10
+put j_delta 0 long -10000
+put j_acct 1 20
+put j_delta 1 long 10001
+if ne post_journal 2 ST_ERR_UNBALANCED
+ret ulong 11
+end
+note 2-leg -1 cent burn attempt
+put j_acct 0 10
+put j_delta 0 long -10001
+put j_acct 1 20
+put j_delta 1 long 10000
+if ne post_journal 2 ST_ERR_UNBALANCED
+ret ulong 12
+end
+note 3-leg credit-only mint attempt
+put j_acct 0 10
+put j_delta 0 long 5000
+put j_acct 1 20
+put j_delta 1 long 5000
+put j_acct 2 30
+put j_delta 2 long 5000
+if ne post_journal 3 ST_ERR_UNBALANCED
+ret ulong 13
+end
+note 8-leg subtle 1-cent imbalance
+for i ulong 4
+put j_acct i add 100 i
+put j_delta i long -1000
+put j_acct add i 4 add 200 i
+put j_delta add i 4 long 1000
+end
+put j_delta 7 long 1001
+if ne post_journal 8 ST_ERR_UNBALANCED
+ret ulong 14
+end
+sv_w t_sv_p1
+ret ulong 0
+end
+
+fn sv_s2_bad_legs to ulong
+if ne post_journal 0 ST_ERR_BAD_LEGS
+ret ulong 21
+end
+if ne post_journal 1 ST_ERR_BAD_LEGS
+ret ulong 22
+end
+if ne post_journal 9 ST_ERR_BAD_LEGS
+ret ulong 23
+end
+if ne post_journal 999999 ST_ERR_BAD_LEGS
+ret ulong 24
+end
+put j_acct 0 10
+put j_delta 0 long 0
+put j_acct 1 20
+put j_delta 1 long 0
+if ne post_journal 2 ST_ERR_NONPOS
+ret ulong 25
+end
+sv_w t_sv_p2
+ret ulong 0
+end
+
+fn sv_s3_nonpos to ulong
+if ne post_transfer 10 20 long 0 ST_ERR_NONPOS
+ret ulong 31
+end
+if ne post_transfer 10 20 long -1 ST_ERR_NONPOS
+ret ulong 32
+end
+if ne post_transfer 10 20 long -1000000000 ST_ERR_NONPOS
+ret ulong 33
+end
+sv_w t_sv_p3
+ret ulong 0
+end
+
+fn sv_s4_oob_accts to ulong
+if ne post_transfer 4096 10 long 100 ST_ERR_BAD_ACCT
+ret ulong 41
+end
+if ne post_transfer 10 4096 long 100 ST_ERR_BAD_ACCT
+ret ulong 42
+end
+if ne post_transfer ulong 18446744073709551615 10 long 100 ST_ERR_BAD_ACCT
+ret ulong 43
+end
+put j_acct 0 10
+put j_delta 0 long -100
+put j_acct 1 4096
+put j_delta 1 long 100
+if ne post_journal 2 ST_ERR_BAD_ACCT
+ret ulong 44
+end
+sv_w t_sv_p4
+ret ulong 0
+end
+
+fn sv_s5_self_dup to ulong
+if ne post_transfer 42 42 long 100 ST_ERR_SELF
+ret ulong 51
+end
+put j_acct 0 30
+put j_delta 0 long -500
+put j_acct 1 30
+put j_delta 1 long -500
+put j_acct 2 40
+put j_delta 2 long 1000
+if ne post_journal 3 ST_ERR_SELF
+ret ulong 52
+end
+sv_w t_sv_p5
+ret ulong 0
+end
+
+fn sv_s6_overdraft_atomic to ulong
+b0 = get acct_bal 0
+if ne post_transfer 0 2 add b0 long 1 ST_ERR_OVERDRAFT
+ret ulong 61
+end
+b1 = get acct_bal 1
+if ne post_transfer 1 2 add add b1 long 5000000 long 1 ST_ERR_OVERDRAFT
+ret ulong 62
+end
+note Multi-leg journal: leg 0 valid, leg 1 valid, leg 2 breaches asset floor -> must abort ALL legs
+b4 = get acct_bal 4
+put j_acct 0 8
+put j_delta 0 long -100
+put j_acct 1 12
+put j_delta 1 long add b4 long 101
+put j_acct 2 4
+put j_delta 2 long neg add b4 long 1
+if ne post_journal 3 ST_ERR_OVERDRAFT
+ret ulong 63
+end
+sv_w t_sv_p6
+ret ulong 0
+end
+
+fn sv_s7_merkle_forgery to ulong
+save_current_root
+generate_proof 1337
+b = get acct_bal 1337
+fl = get acct_floor 1337
+rw = get acct_rw 1337
+mv = or shl ulong get acct_cls 1337 8 ulong get acct_sec 1337
+if ne verify_proof_vals 1337 b fl rw mv 1
+ret ulong 70
+end
+note 1. 1-cent balance forgery
+if ne verify_proof_vals 1337 add b long 1 fl rw mv 0
+ret ulong 71
+end
+note 2. 1-bit account ID forgery
+if ne verify_proof_vals xor ulong 1337 ulong 1 b fl rw mv 0
+ret ulong 72
+end
+note 3. 1-bit class/sector metadata forgery
+if ne verify_proof_vals 1337 b fl rw xor mv ulong 1 0
+ret ulong 73
+end
+note 4. 1-bit Merkle sibling hash forgery
+orig_s = get proof_sib 0
+put proof_sib 0 xor orig_s uint 1
+if ne verify_proof_vals 1337 b fl rw mv 0
+ret ulong 74
+end
+put proof_sib 0 orig_s
+if ne verify_proof_vals 1337 b fl rw mv 1
+ret ulong 75
+end
+sv_w t_sv_p7
+ret ulong 0
+end
+
+fn sv_s8_verify_intact to ulong
+note Verify dirty queue is still 0, committed_tx unchanged, refused_tx == +21
+if ne get batch_meta 1 0
+ret ulong 80
+end
+if ne get batch_meta 4 get sv_pre_meta 0
+ret ulong 81
+end
+if ne get batch_meta 5 add get sv_pre_meta 1 ulong 21
+ret ulong 82
+end
+note Re-run both incremental commit and cold full-table rebuild
+commit_batch_delta
+commit_batch_full
+if ne compare_delta_vs_cold 0
+ret ulong 83
+end
+note Verify EVERY SINGLE ONE of 4,096 account balances is bit-identical
+for i ulong 4096
+if ne get acct_bal i get sv_pre_bal i
+ret ulong 84
+end
+end
+note Verify ALL 4 classes, ALL 4 scalar invariants, ALL 16 sectors, ALL Top-8 breaches
+for c ulong 4
+if ne get roll_cls c get sv_pre_cls c
+ret ulong 85
+end
+if ne get roll_scalars c get sv_pre_scalars c
+ret ulong 86
+end
+end
+for s ulong 16
+if ne get roll_sec s get sv_pre_sec s
+ret ulong 87
+end
+end
+for k ulong 8
+if ne get top_id k get sv_pre_top_id k
+ret ulong 88
+end
+if ne get top_val k get sv_pre_top_val k
+ret ulong 89
+end
+if ne get mhash add 8 k get sv_pre_root k
+ret ulong 90
+end
+if ne get cold_mhash add 8 k get sv_pre_root k
+ret ulong 91
+end
+end
+sv_w t_sv_p8
+emit_merkle_root 0
+emit_nl
+ret ulong 0
+end
+
+fn sv_s9_post_attack_tx to ulong
+if ne post_transfer 10 20 long 7777 ST_OK
+ret ulong 92
+end
+commit_batch_delta
+commit_batch_full
+if ne compare_delta_vs_cold 0
+ret ulong 93
+end
+if ne get roll_scalars 0 get sv_pre_scalars 0
+ret ulong 94
+end
+note Root MUST transition to a distinct valid root after genuine transfer
+same = ulong 1
+for k ulong 8
+if ne get mhash add 8 k get sv_pre_root k
+same = ulong 0
+end
+end
+if ne same 0
+ret ulong 95
+end
+save_current_root
+generate_proof 10
+mv10 = or shl ulong get acct_cls 10 8 ulong get acct_sec 10
+if ne verify_proof_vals 10 get acct_bal 10 get acct_floor 10 get acct_rw 10 mv10 1
+ret ulong 96
+end
+generate_proof 20
+mv20 = or shl ulong get acct_cls 20 8 ulong get acct_sec 20
+if ne verify_proof_vals 20 get acct_bal 20 get acct_floor 20 get acct_rw 20 mv20 1
+ret ulong 97
+end
+sv_w t_sv_p9
+emit_merkle_root 0
+emit_nl
+ret ulong 0
+end
+
+fn main to int
+sv_w t_sv_hdr
+rc = sv_s0_baseline
+if ne rc 0
+ret sv_fail rc
+end
+rc = sv_s1_unbalanced
+if ne rc 0
+ret sv_fail rc
+end
+rc = sv_s2_bad_legs
+if ne rc 0
+ret sv_fail rc
+end
+rc = sv_s3_nonpos
+if ne rc 0
+ret sv_fail rc
+end
+rc = sv_s4_oob_accts
+if ne rc 0
+ret sv_fail rc
+end
+rc = sv_s5_self_dup
+if ne rc 0
+ret sv_fail rc
+end
+rc = sv_s6_overdraft_atomic
+if ne rc 0
+ret sv_fail rc
+end
+rc = sv_s7_merkle_forgery
+if ne rc 0
+ret sv_fail rc
+end
+rc = sv_s8_verify_intact
+if ne rc 0
+ret sv_fail rc
+end
+rc = sv_s9_post_attack_tx
+if ne rc 0
+ret sv_fail rc
+end
+sv_w t_sv_done
+ret 0
+end

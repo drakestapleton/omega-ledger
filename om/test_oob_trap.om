@@ -1,0 +1,10 @@
+note SPDX-License-Identifier: Apache-2.0
+note om/test_oob_trap.om: Negative control proving dynamic out-of-bounds slab write
+note triggers Omega mandatory bounds check trap 3 (exit 103) — CWE-787 / CWE-125!
+
+fn main to int
+init_ledger
+idx = ulong 4096
+put acct_bal idx long 999999
+ret 0
+end
