@@ -1,0 +1,117 @@
+note SPDX-License-Identifier: Apache-2.0
+note om/test_sha256_parity.om: Cross-checks our fast unrolled OM-2 SHA-256 leaf & node hashes
+note bit-for-bit against ~/canon/omega-mv/seed/ng/sha256.om (sh_all)!
+
+text p_pass "PASS SHA256_PARITY_VS_SEED_NG_SHA256_OM\n"
+text p_fail "FAIL SHA256_PARITY\n"
+
+global par_a uint 8
+global par_b uint 8
+global par_n uint 8
+
+fn put_be64_sh off ulong v ulong to void
+for j ulong 8
+s = mul sub 7 j 8
+put sh_dat add off j uchar and shr v s 255
+end
+end
+
+fn put_be32_sh off ulong w uint to void
+for q ulong 4
+s = uint mul sub 3 q 8
+put sh_dat add off q uchar and shr w s 255
+end
+end
+
+fn cmp_sh_dig_global which ulong to ulong
+for j ulong 8
+w = uint 0
+for q ulong 4
+w = or shl w 8 uint get sh_dig add mul j 4 q
+end
+exp = uint 0
+if eq which 0
+exp = get par_a j
+else
+exp = get par_n j
+end
+if ne w exp
+ret ulong 1
+end
+end
+ret ulong 0
+end
+
+fn check_leaf_parity to ulong
+dig_a = new uint 8 0
+bv = long -123456789
+flv = long -5000000
+rwv = long 15000
+mv = ulong 0x010f
+hash_leaf_vals 1337 bv flv rwv mv dig_a
+for j ulong 8
+put par_a j get dig_a j
+end
+put sh_dat 0 0x00
+put sh_dat 1 0x4f
+put sh_dat 2 0x4d
+put sh_dat 3 0x4c
+put sh_dat 4 0x31
+put sh_dat 5 0x4c
+put sh_dat 6 0x45
+put sh_dat 7 0x41
+put_be64_sh 8 1337
+put_be64_sh 16 bitcast ulong bv
+put_be64_sh 24 bitcast ulong flv
+put_be64_sh 32 bitcast ulong rwv
+put_be64_sh 40 mv
+sh_all 48
+ret cmp_sh_dig_global 0
+end
+
+fn check_node_parity to ulong
+dig_a = new uint 8 0
+dig_b = new uint 8 0
+dig_n = new uint 8 0
+for j ulong 8
+put dig_a j get par_a j
+end
+hash_leaf_vals 42 long 99999999 long 0 long 2000 ulong 0x0003 dig_b
+for j ulong 8
+put par_b j get dig_b j
+end
+hash_pair_vals view dig_a view dig_b dig_n
+for j ulong 8
+put par_n j get dig_n j
+end
+put sh_dat 0 0x01
+put sh_dat 1 0x4f
+put sh_dat 2 0x4d
+put sh_dat 3 0x4c
+put sh_dat 4 0x31
+put sh_dat 5 0x4e
+put sh_dat 6 0x4f
+put sh_dat 7 0x44
+for j ulong 8
+put_be32_sh add 8 mul j 4 get par_a j
+put_be32_sh add 40 mul j 4 get par_b j
+end
+sh_all 72
+ret cmp_sh_dig_global 1
+end
+
+fn main to int
+sha_init_k
+rc = check_leaf_parity
+if ne rc 0
+k = write 1 p_fail 0 len p_fail
+ret 1
+end
+rc = check_node_parity
+if ne rc 0
+k = write 1 p_fail 0 len p_fail
+ret 2
+end
+k = write 1 p_pass 0 len p_pass
+ret 0
+end

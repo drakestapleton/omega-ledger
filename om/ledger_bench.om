@@ -1,0 +1,199 @@
+note SPDX-License-Identifier: Apache-2.0
+note om/ledger_bench.om: Pinned CPU benchmark harness for pure OM-2 omega-ledger.
+note Usage: omega-ledger-bench <engine: delta|full|proof> <mode: 0|1|2>
+note   mode 0 = 5% scattered locality (204 accts/batch across full Merkle tree)
+note   mode 1 = 1% scattered locality (41 accts/batch across full Merkle tree)
+note   mode 2 = uniform random stress (4096 accts, ~39% dirty/batch)
+
+text lbl_engine "ENGINE="
+text lbl_mode " MODE="
+text lbl_total " TOTAL_NS="
+text lbl_tx " TX_NS="
+text lbl_commit " COMMIT_NS="
+text lbl_hashes " MERKLE_HASHES="
+text lbl_comm " COMMITTED="
+text lbl_ref " REFUSED="
+text lbl_net " NET_SUM="
+text lbl_cls0 " ASSETS="
+text lbl_cls1 " LIABILITIES="
+text lbl_cls2 " EQUITY="
+text lbl_cls3 " REVENUE="
+text lbl_wr " WEIGHTED_RISK="
+text lbl_bc " BREACH_CNT="
+text lbl_be " BREACH_EXCESS="
+text lbl_top " TOPK="
+text lbl_root " MERKLE_ROOT="
+text lbl_delta "om2_delta"
+text lbl_full "om2_full"
+text lbl_proof "PROOF_BENCH count=10000 total_ns="
+text lbl_pver " verified="
+text lbl_colon ":"
+text lbl_comma ","
+
+fn get_summary_scalar is_full ulong idx ulong to long
+if eq is_full 0
+ret get roll_scalars idx
+end
+ret get cold_scalars idx
+end
+
+fn get_summary_cls is_full ulong idx ulong to long
+if eq is_full 0
+ret get roll_cls idx
+end
+ret get cold_cls idx
+end
+
+fn emit_summary is_full ulong to void
+k = write 1 lbl_net 0 len lbl_net
+emit_i64 get_summary_scalar is_full 0
+k = write 1 lbl_cls0 0 len lbl_cls0
+emit_i64 get_summary_cls is_full 0
+k = write 1 lbl_cls1 0 len lbl_cls1
+emit_i64 get_summary_cls is_full 1
+k = write 1 lbl_cls2 0 len lbl_cls2
+emit_i64 get_summary_cls is_full 2
+k = write 1 lbl_cls3 0 len lbl_cls3
+emit_i64 get_summary_cls is_full 3
+k = write 1 lbl_wr 0 len lbl_wr
+emit_i64 get_summary_scalar is_full 1
+k = write 1 lbl_bc 0 len lbl_bc
+emit_i64 get_summary_scalar is_full 2
+k = write 1 lbl_be 0 len lbl_be
+emit_i64 get_summary_scalar is_full 3
+k = write 1 lbl_top 0 len lbl_top
+for r ulong 8
+if gt r 0
+k = write 1 lbl_comma 0 len lbl_comma
+end
+if eq is_full 0
+emit_u64 get top_id r
+k = write 1 lbl_colon 0 len lbl_colon
+emit_i64 get top_val r
+else
+emit_u64 get cold_top_id r
+k = write 1 lbl_colon 0 len lbl_colon
+emit_i64 get cold_top_val r
+end
+end
+k = write 1 lbl_root 0 len lbl_root
+emit_merkle_root is_full
+emit_nl
+end
+
+fn run_workload is_full ulong mode ulong to void
+init_ledger
+put batch_meta 2 0
+tx_ns = long 0
+cm_ns = long 0
+t_start = monons
+for b ulong 100
+t0 = monons
+run_batch_tx b mode
+t1 = monons
+if eq is_full 0
+commit_batch_delta
+else
+commit_batch_full
+end
+t2 = monons
+tx_ns = add tx_ns sub t1 t0
+cm_ns = add cm_ns sub t2 t1
+end
+t_end = monons
+tot_ns = sub t_end t_start
+k = write 1 lbl_engine 0 len lbl_engine
+if eq is_full 0
+k = write 1 lbl_delta 0 len lbl_delta
+else
+k = write 1 lbl_full 0 len lbl_full
+end
+k = write 1 lbl_mode 0 len lbl_mode
+emit_u64 mode
+k = write 1 lbl_total 0 len lbl_total
+emit_i64 tot_ns
+k = write 1 lbl_tx 0 len lbl_tx
+emit_i64 tx_ns
+k = write 1 lbl_commit 0 len lbl_commit
+emit_i64 cm_ns
+k = write 1 lbl_hashes 0 len lbl_hashes
+emit_u64 get batch_meta 2
+k = write 1 lbl_comm 0 len lbl_comm
+emit_u64 get batch_meta 4
+k = write 1 lbl_ref 0 len lbl_ref
+emit_u64 get batch_meta 5
+emit_summary is_full
+end
+
+fn run_proof_bench to void
+init_ledger
+for b ulong 10
+run_batch_tx b 0
+commit_batch_delta
+end
+save_current_root
+aid = ulong 1337
+generate_proof aid
+bv = get acct_bal aid
+flv = get acct_floor aid
+rwv = get acct_rw aid
+mv = or shl ulong get acct_cls aid 8 ulong get acct_sec aid
+for w ulong 200
+ok = verify_proof_vals aid bv flv rwv mv
+if ne ok 1
+exit 2
+end
+end
+ver = ulong 0
+t0 = monons
+for it ulong 10000
+ok = verify_proof_vals aid bv flv rwv mv
+ver = add ver ok
+end
+t1 = monons
+k = write 1 lbl_proof 0 len lbl_proof
+emit_i64 sub t1 t0
+k = write 1 lbl_pver 0 len lbl_pver
+emit_u64 ver
+emit_nl
+end
+
+fn main to int
+abuf = new uchar 32 0
+ac = argcnt
+if lt ac 2
+run_workload 0 0
+run_workload 1 0
+run_proof_bench
+ret 0
+end
+n1 = argread 1 abuf 0 32
+if le n1 0
+ret 2
+end
+c0 = get abuf 0
+if eq c0 112
+run_proof_bench
+ret 0
+end
+is_full = ulong 0
+if eq c0 102
+is_full = 1
+end
+mode = ulong 0
+if ge ac 3
+n2 = argread 2 abuf 0 32
+if gt n2 0
+c2 = get abuf 0
+if eq c2 49
+mode = 1
+else
+if eq c2 50
+mode = 2
+end
+end
+end
+end
+run_workload is_full mode
+ret 0
+end

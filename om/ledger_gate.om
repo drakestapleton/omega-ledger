@@ -1,0 +1,270 @@
+note SPDX-License-Identifier: Apache-2.0
+note om/ledger_gate.om: Comprehensive positive, refusal, single-bit tamper,
+note and 100,000-transfer bit-exact Delta vs Cold Full-Scan parity gate!
+
+text g_hdr "OMEGA-LEDGER GATE SUITE\n"
+text g_pass_t1 "PASS T1_VALID_TRANSFER_AND_JOURNAL\n"
+text g_pass_t2 "PASS T2_REFUSE_UNBALANCED_JOURNAL\n"
+text g_pass_t3 "PASS T3_REFUSE_NONPOS_AMOUNT\n"
+text g_pass_t4 "PASS T4_REFUSE_SELF_AND_BAD_ACCT\n"
+text g_pass_t5 "PASS T5_REFUSE_OVERDRAFT_FLOOR\n"
+text g_pass_t6 "PASS T6_SINGLE_BIT_TAMPER_DETECTED\n"
+text g_pass_t7 "PASS T7_100K_DELTA_VS_FULL_PARITY_0_MISMATCHES\n"
+text g_pass_t8 "PASS T8_PROOF_VERIFY_POST_100K\n"
+text g_fail "GATE_FAIL code="
+text g_done "GATE_PASS checks=8/8 mismatches=0 root="
+
+fn fail_gate code ulong to int
+k = write 1 g_fail 0 len g_fail
+if lt k 0
+ret int 1
+end
+emit_u64 code
+emit_nl
+ret int code
+end
+
+fn gate_t1 to ulong
+init_ledger
+init_net = get roll_scalars 0
+st = post_transfer 10 20 long 25000
+if ne st ST_OK
+ret ulong 11
+end
+put j_acct 0 30
+put j_delta 0 long -10000
+put j_acct 1 40
+put j_delta 1 long 6000
+put j_acct 2 50
+put j_delta 2 long 4000
+st = post_journal 3
+if ne st ST_OK
+ret ulong 12
+end
+if ne get roll_scalars 0 init_net
+ret ulong 13
+end
+commit_batch_delta
+commit_batch_full
+if ne compare_delta_vs_cold 0
+ret ulong 14
+end
+k = write 1 g_pass_t1 0 len g_pass_t1
+if lt k 0
+ret ulong 15
+end
+ret ulong 0
+end
+
+fn gate_t2 to ulong
+b30 = get acct_bal 30
+b40 = get acct_bal 40
+put j_acct 0 30
+put j_delta 0 long -10000
+put j_acct 1 40
+put j_delta 1 long 9999
+st = post_journal 2
+if ne st ST_ERR_UNBALANCED
+ret ulong 21
+end
+if or ne get acct_bal 30 b30 ne get acct_bal 40 b40
+ret ulong 22
+end
+k = write 1 g_pass_t2 0 len g_pass_t2
+if lt k 0
+ret ulong 23
+end
+ret ulong 0
+end
+
+fn gate_t3 to ulong
+b10 = get acct_bal 10
+st = post_transfer 10 20 long 0
+if ne st ST_ERR_NONPOS
+ret ulong 31
+end
+st = post_transfer 10 20 long -500
+if ne st ST_ERR_NONPOS
+ret ulong 32
+end
+if ne get acct_bal 10 b10
+ret ulong 33
+end
+k = write 1 g_pass_t3 0 len g_pass_t3
+if lt k 0
+ret ulong 34
+end
+ret ulong 0
+end
+
+fn gate_t4 to ulong
+st = post_transfer 10 10 long 100
+if ne st ST_ERR_SELF
+ret ulong 41
+end
+st = post_transfer 4096 10 long 100
+if ne st ST_ERR_BAD_ACCT
+ret ulong 42
+end
+st = post_transfer 10 99999 long 100
+if ne st ST_ERR_BAD_ACCT
+ret ulong 43
+end
+k = write 1 g_pass_t4 0 len g_pass_t4
+if lt k 0
+ret ulong 44
+end
+ret ulong 0
+end
+
+fn gate_t5 to ulong
+b0 = get acct_bal 0
+st = post_transfer 0 2 add b0 long 1
+if ne st ST_ERR_OVERDRAFT
+ret ulong 51
+end
+if ne get acct_bal 0 b0
+ret ulong 52
+end
+b1 = get acct_bal 1
+st = post_transfer 1 2 add add b1 long 5000000 long 1
+if ne st ST_ERR_OVERDRAFT
+ret ulong 53
+end
+if ne get acct_bal 1 b1
+ret ulong 54
+end
+k = write 1 g_pass_t5 0 len g_pass_t5
+if lt k 0
+ret ulong 55
+end
+ret ulong 0
+end
+
+fn gate_t6 to ulong
+save_current_root
+generate_proof 1337
+mv = or shl ulong get acct_cls 1337 8 ulong get acct_sec 1337
+ok = verify_proof_vals 1337 get acct_bal 1337 get acct_floor 1337 get acct_rw 1337 mv
+if ne ok 1
+ret ulong 61
+end
+orig_b = get acct_bal 1337
+tampered_b = add orig_b long 1
+put acct_bal 1337 tampered_b
+ok = verify_proof_vals 1337 tampered_b get acct_floor 1337 get acct_rw 1337 mv
+if ne ok 0
+ret ulong 62
+end
+commit_batch_full
+same_root = ulong 1
+for j ulong 8
+if ne get saved_root j get cold_mhash add 8 j
+same_root = 0
+end
+end
+if ne same_root 0
+ret ulong 63
+end
+put acct_bal 1337 orig_b
+orig_sib = get proof_sib 0
+put proof_sib 0 xor orig_sib uint 1
+ok = verify_proof_vals 1337 orig_b get acct_floor 1337 get acct_rw 1337 mv
+if ne ok 0
+ret ulong 64
+end
+put proof_sib 0 orig_sib
+ok = verify_proof_vals 1337 orig_b get acct_floor 1337 get acct_rw 1337 mv
+if ne ok 1
+ret ulong 65
+end
+k = write 1 g_pass_t6 0 len g_pass_t6
+if lt k 0
+ret ulong 66
+end
+ret ulong 0
+end
+
+fn gate_t7 to ulong
+init_ledger
+init_net = get roll_scalars 0
+for b ulong 100
+mode = rem b 3
+run_batch_tx b mode
+commit_batch_delta
+commit_batch_full
+mism = compare_delta_vs_cold
+if ne mism 0
+ret add ulong 700 b
+end
+if ne get roll_scalars 0 init_net
+ret ulong 799
+end
+end
+k = write 1 g_pass_t7 0 len g_pass_t7
+if lt k 0
+ret ulong 798
+end
+ret ulong 0
+end
+
+fn gate_t8 to ulong
+save_current_root
+for s ulong 64
+aid = mul s 64
+generate_proof aid
+mv = or shl ulong get acct_cls aid 8 ulong get acct_sec aid
+ok = verify_proof_vals aid get acct_bal aid get acct_floor aid get acct_rw aid mv
+if ne ok 1
+ret ulong 81
+end
+end
+k = write 1 g_pass_t8 0 len g_pass_t8
+if lt k 0
+ret ulong 82
+end
+ret ulong 0
+end
+
+fn main to int
+k = write 1 g_hdr 0 len g_hdr
+if lt k 0
+ret 1
+end
+rc = gate_t1
+if ne rc 0
+ret fail_gate rc
+end
+rc = gate_t2
+if ne rc 0
+ret fail_gate rc
+end
+rc = gate_t3
+if ne rc 0
+ret fail_gate rc
+end
+rc = gate_t4
+if ne rc 0
+ret fail_gate rc
+end
+rc = gate_t5
+if ne rc 0
+ret fail_gate rc
+end
+rc = gate_t6
+if ne rc 0
+ret fail_gate rc
+end
+rc = gate_t7
+if ne rc 0
+ret fail_gate rc
+end
+rc = gate_t8
+if ne rc 0
+ret fail_gate rc
+end
+k = write 1 g_done 0 len g_done
+emit_merkle_root 0
+emit_nl
+ret 0
+end

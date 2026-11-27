@@ -1,0 +1,15 @@
+note SPDX-License-Identifier: Apache-2.0
+note om/test_overflow_trap.om: Negative control proving hardware signed 64-bit overflow
+note triggers Omega trap 1 (exit 101) instead of silently wrapping balances!
+
+fn main to int
+init_ledger
+note Place account 10 within 10 minor units of INT64_MAX (9223372036854775807)
+put acct_bal 10 long 9223372036854775797
+note Attempting to credit +100 MUST trigger hardware overflow trap 1 -> exit 101!
+st = post_transfer 20 10 long 100
+if eq st 0
+ret 0
+end
+ret 1
+end

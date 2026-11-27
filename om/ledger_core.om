@@ -1,0 +1,992 @@
+om2
+note SPDX-License-Identifier: Apache-2.0
+note omega-ledger: Pure seeded OM-2 Fixed-Slab Double-Entry Financial Ledger
+note & Exact Algebraic Delta Rollup + Incremental FIPS 180-4 SHA-256 Merkle Engine.
+note Zero heap allocations, zero floats, hardware signed overflow traps (exit 101).
+
+const NUM_ACCTS ulong 4096
+const TREE_NODES ulong 8192
+const TREE_DEPTH ulong 12
+const NUM_CLASSES ulong 4
+const NUM_SECTORS ulong 16
+const TOP_K ulong 8
+
+const ST_OK ulong 0
+const ST_ERR_NONPOS ulong 1
+const ST_ERR_BAD_ACCT ulong 2
+const ST_ERR_SELF ulong 3
+const ST_ERR_OVERDRAFT ulong 4
+const ST_ERR_UNBALANCED ulong 5
+const ST_ERR_BAD_LEGS ulong 6
+
+note Domain-separated 8-byte tags:
+note Leaf: 0x00 "OML1LEA" (48-byte leaf preimage -> 1 SHA-256 block)
+note Node: 0x01 "OML1NOD" (72-byte internal node preimage -> 2 SHA-256 blocks)
+const TAG_LEAF_0 uint 0x004f4d4c
+const TAG_LEAF_1 uint 0x314c4541
+const TAG_NODE_0 uint 0x014f4d4c
+const TAG_NODE_1 uint 0x314e4f44
+
+const BREACH_LIMIT long 14500000
+const LIAB_FLOOR long -5000000
+
+note Fixed-slab account state (zero heap allocation)
+global acct_bal long 4096
+global acct_floor long 4096
+global acct_rw long 4096
+global acct_cls uchar 4096
+global acct_sec uchar 4096
+
+note Exact Algebraic Delta Rollups (maintained O(1) per transfer)
+global roll_cls long 4
+global roll_sec long 16
+global roll_scalars long 4
+note roll_scalars: [0]=net_bal_sum, [1]=weighted_risk, [2]=breach_cnt, [3]=breach_excess
+
+note Max-Tournament Tree over 4096 accounts for O(log N) exact Top-K risk breaches
+global seg_val long 8192
+global seg_idx ulong 8192
+global top_id ulong 8
+global top_val long 8
+global top_cnt ulong 1
+
+note Incremental FIPS 180-4 SHA-256 Merkle Tree (8192 nodes x 8 uint big-endian words)
+global sha_k uint 64
+global mhash uint 65536
+global dirty_acct ulong 4096
+global dirty_node ulong 8192
+global q_buf_a ulong 4096
+global q_buf_b ulong 4096
+global batch_meta ulong 8
+note batch_meta: [0]=batch_gen, [1]=q_a_len, [2]=merkle_hashes_total, [3]=init_done,
+note             [4]=committed_tx, [5]=refused_tx, [6]=rng_state, [7]=initial_net_sum
+
+note Multi-leg journal staging slab (up to 8 legs)
+global j_acct ulong 8
+global j_delta long 8
+
+note Inclusion proof buffer (12 sibling hashes x 8 uint words = 96 uints = 384 bytes)
+global proof_sib uint 96
+global saved_root uint 8
+
+note Cold full-scan scratchpad (separate from incremental state for bit-exact parity checks)
+global cold_cls long 4
+global cold_sec long 16
+global cold_scalars long 4
+global cold_top_id ulong 8
+global cold_top_val long 8
+global cold_top_cnt ulong 1
+global cold_mhash uint 65536
+
+note Formatting scratchpad for stdout
+global fmt_buf uchar 128
+
+text txt_nl "\n"
+text txt_sp " "
+text txt_minus "-"
+
+fn emit_raw n ulong to void
+off = ulong 0
+while lt off n bound 256
+k = write 1 fmt_buf off sub n off
+if le k 0
+ret
+end
+off = add off ulong k
+end
+end
+
+fn emit_nl to void
+k = write 1 txt_nl 0 1
+if lt k 0
+ret
+end
+end
+
+fn emit_sp to void
+k = write 1 txt_sp 0 1
+if lt k 0
+ret
+end
+end
+
+fn emit_u64 val ulong to void
+if eq val 0
+put fmt_buf 0 48
+emit_raw 1
+ret
+end
+tmp = new uchar 32 0
+cnt = ulong 0
+x = val
+while gt x 0 bound 24
+d = rem x 10
+put tmp cnt uchar add d 48
+x = div x 10
+cnt = add cnt 1
+end
+for i ulong cnt bound 24
+put fmt_buf i get tmp sub sub cnt 1 i
+end
+emit_raw cnt
+end
+
+fn emit_i64 val long to void
+if lt val 0
+k = write 1 txt_minus 0 1
+if lt k 0
+ret
+end
+u = sub ulong 0 bitcast ulong val
+emit_u64 u
+ret
+end
+emit_u64 bitcast ulong val
+end
+
+fn hex_nibble n uint to uchar
+if lt n 10
+ret uchar add n 48
+end
+ret uchar add n 87
+end
+
+fn emit_hex_u32 val uint to void
+for i ulong 8
+sh = uint mul sub 7 i 4
+nib = and shr val sh 15
+put fmt_buf i hex_nibble nib
+end
+emit_raw 8
+end
+
+fn emit_merkle_root use_cold ulong to void
+base = ulong 8
+for j ulong 8
+w = uint 0
+if eq use_cold 0
+w = get mhash add base j
+else
+w = get cold_mhash add base j
+end
+emit_hex_u32 w
+end
+end
+
+note FIPS 180-4 SHA-256 round constants K[0..63]
+fn sha_init_k to void
+put sha_k 0 0x428a2f98
+put sha_k 1 0x71374491
+put sha_k 2 0xb5c0fbcf
+put sha_k 3 0xe9b5dba5
+put sha_k 4 0x3956c25b
+put sha_k 5 0x59f111f1
+put sha_k 6 0x923f82a4
+put sha_k 7 0xab1c5ed5
+put sha_k 8 0xd807aa98
+put sha_k 9 0x12835b01
+put sha_k 10 0x243185be
+put sha_k 11 0x550c7dc3
+put sha_k 12 0x72be5d74
+put sha_k 13 0x80deb1fe
+put sha_k 14 0x9bdc06a7
+put sha_k 15 0xc19bf174
+put sha_k 16 0xe49b69c1
+put sha_k 17 0xefbe4786
+put sha_k 18 0x0fc19dc6
+put sha_k 19 0x240ca1cc
+put sha_k 20 0x2de92c6f
+put sha_k 21 0x4a7484aa
+put sha_k 22 0x5cb0a9dc
+put sha_k 23 0x76f988da
+put sha_k 24 0x983e5152
+put sha_k 25 0xa831c66d
+put sha_k 26 0xb00327c8
+put sha_k 27 0xbf597fc7
+put sha_k 28 0xc6e00bf3
+put sha_k 29 0xd5a79147
+put sha_k 30 0x06ca6351
+put sha_k 31 0x14292967
+put sha_k 32 0x27b70a85
+put sha_k 33 0x2e1b2138
+put sha_k 34 0x4d2c6dfc
+put sha_k 35 0x53380d13
+put sha_k 36 0x650a7354
+put sha_k 37 0x766a0abb
+put sha_k 38 0x81c2c92e
+put sha_k 39 0x92722c85
+put sha_k 40 0xa2bfe8a1
+put sha_k 41 0xa81a664b
+put sha_k 42 0xc24b8b70
+put sha_k 43 0xc76c51a3
+put sha_k 44 0xd192e819
+put sha_k 45 0xd6990624
+put sha_k 46 0xf40e3585
+put sha_k 47 0x106aa070
+put sha_k 48 0x19a4c116
+put sha_k 49 0x1e376c08
+put sha_k 50 0x2748774c
+put sha_k 51 0x34b0bcb5
+put sha_k 52 0x391c0cb3
+put sha_k 53 0x4ed8aa4a
+put sha_k 54 0x5b9cca4f
+put sha_k 55 0x682e6ff3
+put sha_k 56 0x748f82ee
+put sha_k 57 0x78a5636f
+put sha_k 58 0x84c87814
+put sha_k 59 0x8cc70208
+put sha_k 60 0x90befffa
+put sha_k 61 0xa4506ceb
+put sha_k 62 0xbef9a3f7
+put sha_k 63 0xc67178f2
+end
+
+fn sha_set_iv st edit uint 8 to void
+put st 0 0x6a09e667
+put st 1 0xbb67ae85
+put st 2 0x3c6ef372
+put st 3 0xa54ff53a
+put st 4 0x510e527f
+put st 5 0x9b05688c
+put st 6 0x1f83d9ab
+put st 7 0x5be0cd19
+end
+
+note Expand message schedule w[0..15] -> w[16..63], fully unrolled (zero bounds checks)
+fn sha_expand w edit uint 64 to void
+x = uint 0
+y = uint 0
+for i ulong 48 unroll
+x = get w add i 1
+y = get w add i 14
+x = add add get w i get w add i 9 xor xor rotr x 7 rotr x 18 shr x 3
+put w add i 16 add x xor xor rotr y 17 rotr y 19 shr y 10
+end
+end
+
+note Execute 64 FIPS 180-4 SHA-256 compression rounds, fully unrolled in registers
+fn sha_rounds st edit uint 8 w view uint 64 to void
+a = get st 0
+b = get st 1
+c = get st 2
+d = get st 3
+e = get st 4
+f = get st 5
+g = get st 6
+h = get st 7
+t = uint 0
+for i ulong 64 unroll
+h = add h get sha_k i
+h = add h get w i
+t = xor rotr e 6 rotr e 11
+t = xor t rotr e 25
+h = add h t
+h = add h xor g and e xor f g
+d = add d h
+t = xor rotr a 2 rotr a 13
+t = xor t rotr a 22
+h = add h t
+t = and c or a b
+h = add h or and a b t
+t = h
+h = g
+g = f
+f = e
+e = d
+d = c
+c = b
+b = a
+a = t
+end
+put st 0 add get st 0 a
+put st 1 add get st 1 b
+put st 2 add get st 2 c
+put st 3 add get st 3 d
+put st 4 add get st 4 e
+put st 5 add get st 5 f
+put st 6 add get st 6 g
+put st 7 add get st 7 h
+end
+
+note Hash canonical 48-byte leaf preimage (1 SHA-256 compression block)
+fn hash_leaf_vals aid ulong bv long flv long rwv long mv ulong dst edit uint 8 to void
+w = new uint 64 0
+u = ulong 0
+put w 0 TAG_LEAF_0
+put w 1 TAG_LEAF_1
+put w 2 uint shr aid 32
+put w 3 uint and aid 0xffffffff
+u = bitcast ulong bv
+put w 4 uint shr u 32
+put w 5 uint and u 0xffffffff
+u = bitcast ulong flv
+put w 6 uint shr u 32
+put w 7 uint and u 0xffffffff
+u = bitcast ulong rwv
+put w 8 uint shr u 32
+put w 9 uint and u 0xffffffff
+put w 10 uint shr mv 32
+put w 11 uint and mv 0xffffffff
+put w 12 0x80000000
+put w 13 0
+put w 14 0
+put w 15 384
+sha_set_iv dst
+sha_expand w
+sha_rounds dst view w
+end
+
+note Hash canonical 72-byte internal node preimage (2 SHA-256 compression blocks)
+fn hash_pair_vals lhs view uint 8 rhs view uint 8 dst edit uint 8 to void
+w = new uint 64 0
+sha_set_iv dst
+put w 0 TAG_NODE_0
+put w 1 TAG_NODE_1
+for j ulong 8
+put w add j 2 get lhs j
+end
+for j ulong 6
+put w add j 10 get rhs j
+end
+sha_expand w
+sha_rounds dst view w
+put w 0 get rhs 6
+put w 1 get rhs 7
+put w 2 0x80000000
+for j ulong 12
+put w add j 3 0
+end
+put w 15 576
+sha_expand w
+sha_rounds dst view w
+end
+
+note Hash leaf acct into mhash (use_cold=0) or cold_mhash (use_cold=1)
+fn hash_leaf_acct acct ulong use_cold ulong to void
+dig = new uint 8 0
+mv = or shl ulong get acct_cls acct 8 ulong get acct_sec acct
+hash_leaf_vals acct get acct_bal acct get acct_floor acct get acct_rw acct mv dig
+base = shl add NUM_ACCTS acct 3
+if eq use_cold 0
+for j ulong 8
+put mhash add base j get dig j
+end
+else
+for j ulong 8
+put cold_mhash add base j get dig j
+end
+end
+end
+
+note Hash internal Merkle node node_id directly from mhash (use_cold=0) or cold_mhash (use_cold=1)
+fn hash_internal_node node_id ulong use_cold ulong to void
+w = new uint 64 0
+st = new uint 8 0
+bl = shl shl node_id 1 3
+br = add bl 8
+sha_set_iv st
+put w 0 TAG_NODE_0
+put w 1 TAG_NODE_1
+if eq use_cold 0
+for j ulong 8
+put w add j 2 get mhash add bl j
+end
+for j ulong 6
+put w add j 10 get mhash add br j
+end
+else
+for j ulong 8
+put w add j 2 get cold_mhash add bl j
+end
+for j ulong 6
+put w add j 10 get cold_mhash add br j
+end
+end
+sha_expand w
+sha_rounds st view w
+if eq use_cold 0
+put w 0 get mhash add br 6
+put w 1 get mhash add br 7
+else
+put w 0 get cold_mhash add br 6
+put w 1 get cold_mhash add br 7
+end
+put w 2 0x80000000
+for j ulong 12
+put w add j 3 0
+end
+put w 15 576
+sha_expand w
+sha_rounds st view w
+bd = shl node_id 3
+if eq use_cold 0
+for j ulong 8
+put mhash add bd j get st j
+end
+else
+for j ulong 8
+put cold_mhash add bd j get st j
+end
+end
+end
+
+note Risk breach excess of balance b above BREACH_LIMIT (0 if <= BREACH_LIMIT)
+fn calc_excess b long to long
+if gt b BREACH_LIMIT
+ret sub b BREACH_LIMIT
+end
+ret long 0
+end
+
+note O(log N) Max-Tournament Tree point update (12 levels, deterministic tie-break by smaller acct id)
+fn seg_update acct ulong ex long to void
+u = add NUM_ACCTS acct
+put seg_val u ex
+put seg_idx u acct
+for step ulong 12
+u = shr u 1
+lc = shl u 1
+rc = add lc 1
+lv = get seg_val lc
+rv = get seg_val rc
+li = get seg_idx lc
+ri = get seg_idx rc
+if or gt lv rv and eq lv rv lt li ri
+put seg_val u lv
+put seg_idx u li
+else
+put seg_val u rv
+put seg_idx u ri
+end
+end
+end
+
+note Build full Max-Tournament Tree bottom-up in O(N)
+fn seg_build_all to void
+for i ulong 4096
+u = add NUM_ACCTS i
+put seg_val u calc_excess get acct_bal i
+put seg_idx u i
+end
+u = ulong 4095
+while gt u 0 bound 4096
+lc = shl u 1
+rc = add lc 1
+lv = get seg_val lc
+rv = get seg_val rc
+li = get seg_idx lc
+ri = get seg_idx rc
+if or gt lv rv and eq lv rv lt li ri
+put seg_val u lv
+put seg_idx u li
+else
+put seg_val u rv
+put seg_idx u ri
+end
+u = sub u 1
+end
+end
+
+note Extract exact Top-8 risk breaches in O(K log N) via pop-and-restore on tournament tree
+fn extract_topk_delta to void
+sid = new ulong 8 0
+sval = new long 8 0
+cnt = ulong 0
+for r ulong 8
+bv = get seg_val 1
+bi = get seg_idx 1
+if le bv 0
+put top_id r 0
+put top_val r 0
+else
+put top_id r bi
+put top_val r bv
+put sid cnt bi
+put sval cnt bv
+cnt = add cnt 1
+seg_update bi long -1
+end
+end
+put top_cnt 0 cnt
+for r ulong cnt bound 8
+seg_update get sid r get sval r
+end
+end
+
+note Deterministic Basel-style risk weight in basis points (0..15000)
+fn init_rw_for acct ulong to long
+k = rem add mul acct 7 3 5
+if eq k 0
+ret long 0
+end
+if eq k 1
+ret long 2000
+end
+if eq k 2
+ret long 5000
+end
+if eq k 3
+ret long 10000
+end
+ret long 15000
+end
+
+note Initialize deterministic 4,096-account ledger, exact rollups, tournament tree, and Merkle root
+fn init_ledger to void
+if eq get batch_meta 3 0
+sha_init_k
+put batch_meta 3 1
+end
+for c ulong 4
+put roll_cls c 0
+end
+for s ulong 16
+put roll_sec s 0
+end
+for m ulong 4
+put roll_scalars m 0
+end
+for i ulong 4096
+put dirty_acct i 0
+end
+for n ulong 8192
+put dirty_node n 0
+end
+put batch_meta 0 1
+put batch_meta 1 0
+put batch_meta 2 0
+put batch_meta 4 0
+put batch_meta 5 0
+put batch_meta 6 0x9e3779b97f4a7c15
+net_sum = long 0
+w_risk = long 0
+b_cnt = long 0
+b_exc = long 0
+for i ulong 4096
+cls = and i 3
+sec = and shr i 2 15
+rw = init_rw_for i
+bv = add long 10000000 long rem mul i 7919 5000000
+flv = long 0
+if eq cls 1
+flv = LIAB_FLOOR
+end
+put acct_cls i uchar cls
+put acct_sec i uchar sec
+put acct_rw i rw
+put acct_bal i bv
+put acct_floor i flv
+put roll_cls cls add get roll_cls cls bv
+put roll_sec sec add get roll_sec sec bv
+net_sum = add net_sum bv
+w_risk = add w_risk mul bv rw
+ex = calc_excess bv
+if gt ex 0
+b_cnt = add b_cnt 1
+b_exc = add b_exc ex
+end
+end
+put roll_scalars 0 net_sum
+put roll_scalars 1 w_risk
+put roll_scalars 2 b_cnt
+put roll_scalars 3 b_exc
+put batch_meta 7 bitcast ulong net_sum
+seg_build_all
+extract_topk_delta
+for i ulong 4096
+hash_leaf_acct i 0
+end
+u = ulong 4095
+while gt u 0 bound 4096
+hash_internal_node u 0
+u = sub u 1
+end
+end
+
+note Apply single-account signed delta with exact algebraic rollup update and dirty marking
+fn apply_acct_delta acct ulong dlt long to void
+old_b = get acct_bal acct
+new_b = add old_b dlt
+put acct_bal acct new_b
+cls = ulong get acct_cls acct
+sec = ulong get acct_sec acct
+rw = get acct_rw acct
+put roll_cls cls add get roll_cls cls dlt
+put roll_sec sec add get roll_sec sec dlt
+put roll_scalars 0 add get roll_scalars 0 dlt
+put roll_scalars 1 add get roll_scalars 1 mul dlt rw
+old_ex = calc_excess old_b
+new_ex = calc_excess new_b
+if ne old_ex new_ex
+bc = get roll_scalars 2
+be = get roll_scalars 3
+if gt old_ex 0
+bc = sub bc 1
+be = sub be old_ex
+end
+if gt new_ex 0
+bc = add bc 1
+be = add be new_ex
+end
+put roll_scalars 2 bc
+put roll_scalars 3 be
+end
+gen = get batch_meta 0
+if ne get dirty_acct acct gen
+put dirty_acct acct gen
+ql = get batch_meta 1
+put q_buf_a ql acct
+put batch_meta 1 add ql 1
+end
+end
+
+note Atomic double-entry transfer (debit from_id, credit to_id) with strict refusal controls
+fn post_transfer from_id ulong to_id ulong amt long to ulong
+if le amt 0
+put batch_meta 5 add get batch_meta 5 1
+ret ST_ERR_NONPOS
+end
+if or ge from_id NUM_ACCTS ge to_id NUM_ACCTS
+put batch_meta 5 add get batch_meta 5 1
+ret ST_ERR_BAD_ACCT
+end
+if eq from_id to_id
+put batch_meta 5 add get batch_meta 5 1
+ret ST_ERR_SELF
+end
+new_from = sub get acct_bal from_id amt
+if lt new_from get acct_floor from_id
+put batch_meta 5 add get batch_meta 5 1
+ret ST_ERR_OVERDRAFT
+end
+apply_acct_delta from_id neg amt
+apply_acct_delta to_id amt
+put batch_meta 4 add get batch_meta 4 1
+ret ST_OK
+end
+
+note Atomic multi-leg journal entry (2..8 legs) with strict sum(debits)==sum(credits) check
+fn post_journal nlegs ulong to ulong
+if or lt nlegs 2 gt nlegs 8
+put batch_meta 5 add get batch_meta 5 1
+ret ST_ERR_BAD_LEGS
+end
+sum_deb = long 0
+sum_crd = long 0
+for i ulong nlegs bound 8
+aid = get j_acct i
+dlt = get j_delta i
+if ge aid NUM_ACCTS
+put batch_meta 5 add get batch_meta 5 1
+ret ST_ERR_BAD_ACCT
+end
+if eq dlt 0
+put batch_meta 5 add get batch_meta 5 1
+ret ST_ERR_NONPOS
+end
+for k ulong i bound 8
+if eq get j_acct k aid
+put batch_meta 5 add get batch_meta 5 1
+ret ST_ERR_SELF
+end
+end
+nb = add get acct_bal aid dlt
+if lt nb get acct_floor aid
+put batch_meta 5 add get batch_meta 5 1
+ret ST_ERR_OVERDRAFT
+end
+if lt dlt 0
+sum_deb = add sum_deb neg dlt
+else
+sum_crd = add sum_crd dlt
+end
+end
+if or ne sum_deb sum_crd eq sum_deb 0
+put batch_meta 5 add get batch_meta 5 1
+ret ST_ERR_UNBALANCED
+end
+for i ulong nlegs bound 8
+apply_acct_delta get j_acct i get j_delta i
+end
+put batch_meta 4 add get batch_meta 4 1
+ret ST_OK
+end
+
+note Incremental O(k log N) batch commit: updates only k dirty leaves, tournament tree,
+note and unique dirty ancestor Merkle nodes bottom-up level by level!
+fn commit_batch_delta to void
+gen = get batch_meta 0
+qlen = get batch_meta 1
+if eq qlen 0
+extract_topk_delta
+ret
+end
+nlen = ulong 0
+hashes = ulong 0
+for i ulong qlen bound 4096
+acct = get q_buf_a i
+seg_update acct calc_excess get acct_bal acct
+hash_leaf_acct acct 0
+hashes = add hashes 1
+p = shr add NUM_ACCTS acct 1
+if ne get dirty_node p gen
+put dirty_node p gen
+put q_buf_b nlen p
+nlen = add nlen 1
+end
+end
+use_b = ulong 1
+for lvl ulong 12
+nxt = ulong 0
+if eq use_b 1
+for i ulong nlen bound 4096
+u = get q_buf_b i
+hash_internal_node u 0
+hashes = add hashes 1
+if gt u 1
+p = shr u 1
+if ne get dirty_node p gen
+put dirty_node p gen
+put q_buf_a nxt p
+nxt = add nxt 1
+end
+end
+end
+use_b = 0
+else
+for i ulong nlen bound 4096
+u = get q_buf_a i
+hash_internal_node u 0
+hashes = add hashes 1
+if gt u 1
+p = shr u 1
+if ne get dirty_node p gen
+put dirty_node p gen
+put q_buf_b nxt p
+nxt = add nxt 1
+end
+end
+end
+use_b = 1
+end
+nlen = nxt
+end
+extract_topk_delta
+put batch_meta 2 add get batch_meta 2 hashes
+put batch_meta 0 add gen 1
+put batch_meta 1 0
+end
+
+note Insert candidate (aid, ex) into cold_top_id/cold_top_val (descending ex, ascending aid)
+fn cold_topk_insert aid ulong ex long to void
+cnt = get cold_top_cnt 0
+pos = cnt
+if eq pos TOP_K
+lv = get cold_top_val 7
+li = get cold_top_id 7
+if or lt ex lv and eq ex lv gt aid li
+ret
+end
+pos = 7
+else
+put cold_top_cnt 0 add cnt 1
+end
+while gt pos 0 bound 8
+pv = get cold_top_val sub pos 1
+pi = get cold_top_id sub pos 1
+if or gt ex pv and eq ex pv lt aid pi
+put cold_top_val pos pv
+put cold_top_id pos pi
+pos = sub pos 1
+else
+break
+end
+end
+put cold_top_val pos ex
+put cold_top_id pos aid
+end
+
+note Cold O(N) full-table rollup + Top-8 + full 4,096-leaf Merkle tree recomputation
+fn commit_batch_full to void
+for c ulong 4
+put cold_cls c 0
+end
+for s ulong 16
+put cold_sec s 0
+end
+for r ulong 8
+put cold_top_id r 0
+put cold_top_val r 0
+end
+put cold_top_cnt 0 0
+net_sum = long 0
+w_risk = long 0
+b_cnt = long 0
+b_exc = long 0
+for i ulong 4096
+bv = get acct_bal i
+cls = ulong get acct_cls i
+sec = ulong get acct_sec i
+rw = get acct_rw i
+put cold_cls cls add get cold_cls cls bv
+put cold_sec sec add get cold_sec sec bv
+net_sum = add net_sum bv
+w_risk = add w_risk mul bv rw
+ex = calc_excess bv
+if gt ex 0
+b_cnt = add b_cnt 1
+b_exc = add b_exc ex
+cold_topk_insert i ex
+end
+end
+put cold_scalars 0 net_sum
+put cold_scalars 1 w_risk
+put cold_scalars 2 b_cnt
+put cold_scalars 3 b_exc
+for i ulong 4096
+hash_leaf_acct i 1
+end
+u = ulong 4095
+while gt u 0 bound 4096
+hash_internal_node u 1
+u = sub u 1
+end
+put batch_meta 2 add get batch_meta 2 8191
+put batch_meta 0 add get batch_meta 0 1
+put batch_meta 1 0
+end
+
+note Generate 12-sibling cryptographic Merkle inclusion proof for acct into proof_sib[0..95]
+fn generate_proof acct ulong to void
+u = add NUM_ACCTS acct
+for d ulong 12
+sib = xor u 1
+bs = shl sib 3
+bd = shl d 3
+for j ulong 8
+put proof_sib add bd j get mhash add bs j
+end
+u = shr u 1
+end
+end
+
+note Save current incremental Merkle root into saved_root[0..7]
+fn save_current_root to void
+for j ulong 8
+put saved_root j get mhash add 8 j
+end
+end
+
+note Verify cryptographic inclusion proof for (acct, bv, flv, rwv, mv) against saved_root[0..7]
+note Returns 1 iff valid, 0 if tampered/invalid!
+fn verify_proof_vals acct ulong bv long flv long rwv long mv ulong to ulong
+cur = new uint 8 0
+sib = new uint 8 0
+nxt = new uint 8 0
+hash_leaf_vals acct bv flv rwv mv cur
+idx = acct
+for d ulong 12
+bd = shl d 3
+for j ulong 8
+put sib j get proof_sib add bd j
+end
+if eq and idx 1 0
+hash_pair_vals view cur view sib nxt
+else
+hash_pair_vals view sib view cur nxt
+end
+for j ulong 8
+put cur j get nxt j
+end
+idx = shr idx 1
+end
+for j ulong 8
+if ne get cur j get saved_root j
+ret ulong 0
+end
+end
+ret ulong 1
+end
+
+note Compare incremental Delta state vs cold Full-Scan state (returns 0 iff 100% bit-exact!)
+fn compare_delta_vs_cold to ulong
+mism = ulong 0
+for c ulong 4
+if ne get roll_cls c get cold_cls c
+mism = add mism 1
+end
+end
+for s ulong 16
+if ne get roll_sec s get cold_sec s
+mism = add mism 1
+end
+end
+for m ulong 4
+if ne get roll_scalars m get cold_scalars m
+mism = add mism 1
+end
+end
+if ne get top_cnt 0 get cold_top_cnt 0
+mism = add mism 1
+end
+for r ulong 8
+if ne get top_id r get cold_top_id r
+mism = add mism 1
+end
+if ne get top_val r get cold_top_val r
+mism = add mism 1
+end
+end
+for j ulong 8
+if ne get mhash add 8 j get cold_mhash add 8 j
+mism = add mism 1
+end
+end
+ret mism
+end
+
+note SplitMix64 deterministic PRNG step (stored in batch_meta[6])
+fn prng_next to ulong
+st = add get batch_meta 6 0x9e3779b97f4a7c15
+put batch_meta 6 st
+z = st
+z = mul xor z shr z 30 0xbf58476d1ce4e5b9
+z = mul xor z shr z 27 0x94d049bb133111eb
+ret xor z shr z 31
+end
+
+fn run_one_tx cbase ulong csize ulong cm1 ulong to void
+rv = prng_next
+i1 = rem rv csize
+i2 = rem shr rv 20 cm1
+if ge i2 i1
+i2 = add i2 1
+end
+note Prime stride 197 (gcd(197,4096)=1) scatters active accounts uniformly across all Merkle subtrees!
+i1 = and add cbase mul i1 197 4095
+i2 = and add cbase mul i2 197 4095
+amt = add long 100 long rem shr rv 40 50000
+st = post_transfer i1 i2 amt
+if gt st 99
+ret
+end
+end
+
+note Execute 1 batch of 1,000 deterministic double-entry transfers
+note mode: 0 = 5% scattered locality (204 accts), 1 = 1% scattered locality (41 accts), 2 = uniform (4096 accts)
+fn run_batch_tx batch_idx ulong mode ulong to void
+csize = ulong 204
+cbase = and mul batch_idx 41 4095
+if eq mode 1
+csize = 41
+else
+if eq mode 2
+csize = 4096
+cbase = 0
+end
+end
+cm1 = sub csize 1
+for t ulong 1000
+run_one_tx cbase csize cm1
+end
+end
